@@ -371,7 +371,7 @@ function Add-SubscriptionCollection {
         @{ dataset = "security_regulatory_assessments"; args = @("security", "regulatory-compliance-assessment", "list", "--subscription", $SubId); fam = @("CA", "RA", "PM") }
         @{ dataset = "secure_scores"; args = @("security", "secure-score", "list", "--subscription", $SubId); fam = @("CA", "RA", "PM") }
         @{ dataset = "vnets"; args = @("network", "vnet", "list", "--subscription", $SubId); fam = @("SC", "AC", "CM") }
-        @{ dataset = "subnets_via_graph"; args = @("graph", "query", "-q", "Resources | where type =~ 'microsoft.network/virtualnetworks/subnets' | where subscriptionId =~ '$SubId'"); fam = @("SC", "AC", "CM"); ext = @("resource-graph") }
+        @{ dataset = "subnets"; args = @("resource", "list", "--subscription", $SubId, "--resource-type", "Microsoft.Network/virtualNetworks/subnets"); fam = @("SC", "AC", "CM") }
         @{ dataset = "nsgs"; args = @("network", "nsg", "list", "--subscription", $SubId); fam = @("SC", "AC", "CM") }
         @{ dataset = "route_tables"; args = @("network", "route-table", "list", "--subscription", $SubId); fam = @("SC", "CM") }
         @{ dataset = "firewalls"; args = @("network", "firewall", "list", "--subscription", $SubId); fam = @("SC", "SI") }
