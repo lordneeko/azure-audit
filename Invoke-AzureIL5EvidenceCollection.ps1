@@ -15,6 +15,8 @@ param(
     [string]$OutputRoot = ".\evidence",
     [string[]]$SubscriptionId,
     [int]$ActivityLogDays = 90,
+    [int]$CommandTimeoutSeconds = 300,
+    [int]$CommandHeartbeatSeconds = 20,
     [switch]$IncludeResourceDiagnostics,
     [switch]$IncludeResourceConfigDump,
     [switch]$ControlCatalogCsv,
@@ -26,6 +28,7 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
 
 $script:StartedAt = Get-Date
+$script:CurrentStep = "initializing"
 $script:EvidenceIndex = New-Object System.Collections.Generic.List[object]
 $script:CollectionErrors = New-Object System.Collections.Generic.List[object]
 $script:CollectionSkipped = New-Object System.Collections.Generic.List[object]
@@ -74,6 +77,19 @@ function Ensure-Tooling {
     }
 }
 
+function Set-AzNonInteractiveRuntime {
+    if ($AirGappedProfile) {
+        $env:AZURE_EXTENSION_USE_DYNAMIC_INSTALL = "no"
+    }
+    elseif (-not $env:AZURE_EXTENSION_USE_DYNAMIC_INSTALL) {
+        $env:AZURE_EXTENSION_USE_DYNAMIC_INSTALL = "yes_without_prompt"
+    }
+
+    if (-not $env:AZURE_CORE_NO_COLOR) {
+        $env:AZURE_CORE_NO_COLOR = "1"
+    }
+}
+
 function Initialize-ExtensionInventory {
     $raw = & az extension list --only-show-errors --output json 2>&1
     if ($LASTEXITCODE -ne 0) {
@@ -90,6 +106,76 @@ function Initialize-ExtensionInventory {
     }
     catch {
         # Continue without extension inventory if parsing fails.
+    }
+}
+
+function Invoke-AzCommandMonitored {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory = $true)][string[]]$Args,
+        [Parameter(Mandatory = $true)][string]$DisplayCommand
+    )
+
+    $stdoutPath = [System.IO.Path]::GetTempFileName()
+    $stderrPath = [System.IO.Path]::GetTempFileName()
+    $proc = $null
+    $started = Get-Date
+
+    try {
+        $proc = Start-Process -FilePath "az" -ArgumentList $Args -NoNewWindow -PassThru `
+            -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+
+        $timedOut = $false
+        $heartbeatMs = [Math]::Max(1, $CommandHeartbeatSeconds) * 1000
+        $timeoutSeconds = [Math]::Max(1, $CommandTimeoutSeconds)
+
+        while (-not $proc.HasExited) {
+            Start-Sleep -Milliseconds $heartbeatMs
+
+            $elapsedSeconds = [int]((Get-Date) - $started).TotalSeconds
+            Write-Info ("Still collecting ({0}s elapsed): {1}" -f $elapsedSeconds, $DisplayCommand)
+
+            if ($elapsedSeconds -ge $timeoutSeconds) {
+                $timedOut = $true
+                break
+            }
+        }
+
+        if ($timedOut -and -not $proc.HasExited) {
+            Write-Warn ("Command timeout reached after {0}s: {1}" -f $timeoutSeconds, $DisplayCommand)
+            try {
+                Stop-Process -Id $proc.Id -Force -ErrorAction Stop
+            }
+            catch {
+                try { Stop-Process -Id $proc.Id -ErrorAction SilentlyContinue } catch { }
+            }
+        }
+
+        if (-not $proc.HasExited) {
+            $proc.WaitForExit()
+        }
+
+        $elapsed = [int]((Get-Date) - $started).TotalSeconds
+        $stdoutText = ""
+        $stderrText = ""
+        if (Test-Path $stdoutPath) {
+            $stdoutText = Get-Content -Path $stdoutPath -Raw
+        }
+        if (Test-Path $stderrPath) {
+            $stderrText = Get-Content -Path $stderrPath -Raw
+        }
+
+        return [pscustomobject]@{
+            timed_out = $timedOut
+            exit_code = if ($timedOut) { 124 } else { $proc.ExitCode }
+            stdout = $stdoutText
+            stderr = $stderrText
+            elapsed_seconds = $elapsed
+        }
+    }
+    finally {
+        if (Test-Path $stdoutPath) { Remove-Item -Path $stdoutPath -Force -ErrorAction SilentlyContinue }
+        if (Test-Path $stderrPath) { Remove-Item -Path $stderrPath -Force -ErrorAction SilentlyContinue }
     }
 }
 
@@ -154,11 +240,29 @@ function Invoke-AzJson {
     Write-Info $display
 
     $fullArgs = @() + $Args + @("--only-show-errors", "--output", "json")
-    $raw = & az @fullArgs 2>&1
-    $exit = $LASTEXITCODE
+    $result = Invoke-AzCommandMonitored -Args $fullArgs -DisplayCommand $display
+    $exit = [int]$result.exit_code
+
+    if ($result.timed_out) {
+        $msg = "Timed out after {0}s (timeout={1}s)." -f $result.elapsed_seconds, [Math]::Max(1, $CommandTimeoutSeconds)
+        $stderrTxt = ($result.stderr | Out-String).Trim()
+        if ($stderrTxt) {
+            $msg = "{0} stderr: {1}" -f $msg, $stderrTxt
+        }
+        Write-Warn ("Timeout: {0}" -f $display)
+        $script:CollectionErrors.Add([pscustomobject]@{
+            timestamp = (Get-Date).ToString("o")
+            scope = $Scope
+            dataset = $Dataset
+            command = $display
+            error = $msg
+        }) | Out-Null
+        return
+    }
 
     if ($exit -ne 0) {
-        $msg = ($raw | Out-String).Trim()
+        $msg = ($result.stderr | Out-String).Trim()
+        if (-not $msg) { $msg = ($result.stdout | Out-String).Trim() }
         if (-not $msg) { $msg = "Unknown Azure CLI error." }
         Write-Warn ("Failed: {0}" -f $display)
         $script:CollectionErrors.Add([pscustomobject]@{
@@ -171,18 +275,36 @@ function Invoke-AzJson {
         return
     }
 
-    try {
-        $parsed = $raw | ConvertFrom-Json -Depth 100
-    }
-    catch {
-        $msg = "JSON parse failure for command: $display"
-        Write-Warn $msg
+    $stdoutText = ($result.stdout | Out-String).Trim()
+    if (-not $stdoutText) {
+        Write-Warn ("No stdout content returned for: {0}" -f $display)
         $script:CollectionErrors.Add([pscustomobject]@{
             timestamp = (Get-Date).ToString("o")
             scope = $Scope
             dataset = $Dataset
             command = $display
-            error = $_.Exception.Message
+            error = "Empty JSON response on stdout."
+        }) | Out-Null
+        return
+    }
+
+    try {
+        $parsed = $stdoutText | ConvertFrom-Json -Depth 100
+    }
+    catch {
+        $msg = "JSON parse failure for command: $display"
+        Write-Warn $msg
+        $stderrTxt = ($result.stderr | Out-String).Trim()
+        $parseErr = $_.Exception.Message
+        if ($stderrTxt) {
+            $parseErr = "{0} stderr: {1}" -f $parseErr, $stderrTxt
+        }
+        $script:CollectionErrors.Add([pscustomobject]@{
+            timestamp = (Get-Date).ToString("o")
+            scope = $Scope
+            dataset = $Dataset
+            command = $display
+            error = $parseErr
         }) | Out-Null
         return
     }
@@ -211,6 +333,7 @@ function Invoke-AzJson {
         records = $count
         nist_800_53_families = $NistFamilies
         nist_800_53_controls = $controlIds
+        elapsed_seconds = $result.elapsed_seconds
     }) | Out-Null
 }
 
@@ -373,15 +496,35 @@ function Add-SubscriptionCollection {
 }
 
 try {
-    Ensure-Tooling
-    Initialize-ExtensionInventory
+    $script:CurrentStep = "parameter_validation"
+    if ($CommandTimeoutSeconds -lt 1) {
+        throw "CommandTimeoutSeconds must be >= 1."
+    }
+    if ($CommandHeartbeatSeconds -lt 1) {
+        throw "CommandHeartbeatSeconds must be >= 1."
+    }
 
+    $script:CurrentStep = "tooling_validation"
+    Write-Info "Startup: validating Azure CLI availability and authentication."
+    Ensure-Tooling
+
+    $script:CurrentStep = "runtime_configuration"
+    Write-Info "Startup: applying non-interactive Azure CLI runtime settings."
+    Set-AzNonInteractiveRuntime
+
+    $script:CurrentStep = "extension_inventory"
+    Write-Info "Startup: loading installed Azure CLI extensions."
+    Initialize-ExtensionInventory
+    Write-Info ("Startup: detected {0} installed extension(s)." -f $script:InstalledAzExtensions.Count)
+
+    $script:CurrentStep = "output_directory_setup"
     $runId = Get-Date -Format "yyyyMMdd_HHmmss"
     $root = Join-Path $OutputRoot ("azure_audit_{0}" -f $runId)
     $null = New-Item -Path $root -ItemType Directory -Force
 
     Write-Info ("Output root: {0}" -f $root)
 
+    $script:CurrentStep = "tenant_level_collection"
     Invoke-AzJson -Args @("version") -OutputFile (Join-Path $root "az_version.json") `
         -Scope "session" -Dataset "az_version" -NistFamilies @("SA", "CM")
     Invoke-AzJson -Args @("extension", "list") -OutputFile (Join-Path $root "az_extensions.json") `
@@ -416,6 +559,7 @@ try {
 
     Write-Info ("Target subscriptions: {0}" -f $targetSubs.Count)
 
+    $script:CurrentStep = "subscription_collection"
     foreach ($sub in $targetSubs) {
         $subSafe = New-SafeName $sub.name
         $subFolder = Join-Path $root ("subscription_{0}_{1}" -f $subSafe, $sub.id)
@@ -424,6 +568,7 @@ try {
         Add-SubscriptionCollection -SubId $sub.id -SubName $sub.name -SubFolder $subFolder
     }
 
+    $script:CurrentStep = "artifact_writeout"
     $indexPath = Join-Path $root "evidence_index.json"
     $errorsPath = Join-Path $root "collection_errors.json"
     $skippedPath = Join-Path $root "collection_skipped.json"
@@ -478,12 +623,15 @@ try {
         $catalogRows | Export-Csv -NoTypeInformation -Encoding utf8 -Path $controlCatalogResolved
     }
 
+    $script:CurrentStep = "summary_writeout"
     $summary = [pscustomobject]@{
         run_started = $script:StartedAt.ToString("o")
         run_finished = (Get-Date).ToString("o")
         output_root = $root
         subscription_filter = $SubscriptionId
         activity_log_days = $ActivityLogDays
+        command_timeout_seconds = $CommandTimeoutSeconds
+        command_heartbeat_seconds = $CommandHeartbeatSeconds
         include_resource_diagnostics = [bool]$IncludeResourceDiagnostics
         include_resource_config_dump = [bool]$IncludeResourceConfigDump
         air_gapped_profile = [bool]$AirGappedProfile
@@ -503,6 +651,10 @@ try {
     }
 }
 catch {
-    Write-Error $_.Exception.Message
-    exit 1
+    $message = "Fatal error during step '{0}': {1}" -f $script:CurrentStep, $_.Exception.Message
+    Write-Error $message
+    if ($_.ScriptStackTrace) {
+        Write-Error ("StackTrace: {0}" -f $_.ScriptStackTrace)
+    }
+    throw
 }

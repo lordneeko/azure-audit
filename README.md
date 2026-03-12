@@ -20,12 +20,15 @@ az login
 # Increase activity log lookback (default 90 days)
 .\Invoke-AzureIL5EvidenceCollection.ps1 -ActivityLogDays 180
 
+# Timeout and heartbeat tuning (defaults: 300s timeout, 20s heartbeat)
+.\Invoke-AzureIL5EvidenceCollection.ps1 -CommandTimeoutSeconds 600 -CommandHeartbeatSeconds 15
+
 # Deep collection (slower): per-resource diagnostic settings and full resource config dumps
 .\Invoke-AzureIL5EvidenceCollection.ps1 -IncludeResourceDiagnostics -IncludeResourceConfigDump
 
 # Export dataset-to-control mapping catalog CSV (default path under run folder)
 .\Invoke-AzureIL5EvidenceCollection.ps1 -ControlCatalogCsv
-
+ 
 # Custom control catalog CSV path
 .\Invoke-AzureIL5EvidenceCollection.ps1 -ControlCatalogCsv -ControlCatalogCsvPath .\out\control_catalog.csv
 
@@ -40,6 +43,11 @@ Each run writes a timestamped directory:
 - `collection_errors.json`: non-fatal command failures (unsupported command/extension/permissions)
 - `collection_skipped.json`: intentionally skipped datasets (for example in `-AirGappedProfile`)
 - `subscription_*`: per-subscription evidence JSON files
+
+Runtime behavior:
+- While a command is still running, heartbeat status lines are printed every `-CommandHeartbeatSeconds`.
+- If a command exceeds `-CommandTimeoutSeconds`, it is terminated, logged to `collection_errors.json`, and the script continues.
+- In `-AirGappedProfile`, extension auto-install is disabled and extension-dependent datasets are skipped cleanly.
 
 When `-ControlCatalogCsv` is enabled, a CSV is also written with:
 - dataset scope + command provenance
