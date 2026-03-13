@@ -53,3 +53,28 @@ When `-ControlCatalogCsv` is enabled, a CSV is also written with:
 - dataset scope + command provenance
 - mapped NIST 800-53 Rev 5 control families
 - mapped NIST 800-53 Rev 5 control IDs (for assessor evidence indexing)
+
+## Offline Analysis Tools
+
+### Browser Evidence Viewer (No Server)
+- Open `tools/viewer/index.html` directly in a browser (`file://`).
+- Load a run folder (for example `evidence/azure_audit_YYYYMMDD_HHMMSS`).
+- View KPIs, dataset coverage, errors/skips, control-family/control-ID aggregation, and raw JSON.
+- Use `Print Report (PDF)` to export a document-ready report.
+
+Details: `tools/viewer/README.md`
+
+### LLM Packet Exporter
+Build LLM-friendly outputs from a run folder:
+
+```powershell
+# Use latest run under .\evidence
+.\tools\build-llm-packet.ps1
+
+# Specify a run folder
+.\tools\build-llm-packet.ps1 -RunPath .\evidence\azure_audit_20260313_120000
+```
+
+Outputs under `<run>\llm_packet\`:
+- `llm_packet.md`
+- `llm_packet.jsonl`

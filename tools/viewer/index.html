@@ -1,0 +1,532 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Azure Audit Evidence Viewer</title>
+  <style>
+    :root {
+      --bg: #0d1b2a;
+      --panel: #1b263b;
+      --panel-2: #24344f;
+      --text: #e9eef7;
+      --muted: #b3c1d6;
+      --accent: #20b486;
+      --warn: #e0a500;
+      --danger: #d95f5f;
+      --border: #3a4e6f;
+      --mono: "Cascadia Mono", "Consolas", "SFMono-Regular", Menlo, monospace;
+      --sans: "Segoe UI", "Tahoma", "Verdana", sans-serif;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: var(--sans);
+      color: var(--text);
+      background: radial-gradient(circle at 20% 0%, #15304e, var(--bg) 45%);
+    }
+    header {
+      padding: 16px;
+      border-bottom: 1px solid var(--border);
+      background: linear-gradient(120deg, #11243a, #0d1b2a);
+      position: sticky;
+      top: 0;
+      z-index: 10;
+    }
+    h1 {
+      margin: 0 0 8px 0;
+      font-size: 20px;
+    }
+    .toolbar {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    button, input, select {
+      font: inherit;
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: var(--panel-2);
+      color: var(--text);
+      padding: 8px 10px;
+    }
+    button {
+      cursor: pointer;
+      background: #17486e;
+    }
+    button:hover { background: #1d5f90; }
+    .layout {
+      display: grid;
+      grid-template-columns: 320px 1fr;
+      min-height: calc(100vh - 86px);
+    }
+    aside {
+      border-right: 1px solid var(--border);
+      padding: 12px;
+      background: rgba(10, 20, 35, 0.6);
+      overflow-y: auto;
+    }
+    main {
+      padding: 12px;
+      overflow: auto;
+    }
+    .panel {
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      background: rgba(27, 38, 59, 0.75);
+      margin-bottom: 12px;
+      overflow: hidden;
+    }
+    .panel h2 {
+      margin: 0;
+      font-size: 14px;
+      padding: 10px;
+      border-bottom: 1px solid var(--border);
+      background: rgba(0, 0, 0, 0.15);
+    }
+    .panel-body { padding: 10px; }
+    .kpi-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(130px, 1fr));
+      gap: 8px;
+    }
+    .kpi {
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      background: #15233a;
+      padding: 8px;
+    }
+    .kpi .v { font-size: 20px; font-weight: 700; }
+    .kpi .k { color: var(--muted); font-size: 12px; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 12px;
+    }
+    th, td {
+      border: 1px solid var(--border);
+      padding: 6px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #1e3050; }
+    .mono { font-family: var(--mono); }
+    .status-ok { color: var(--accent); }
+    .status-warn { color: var(--warn); }
+    .status-bad { color: var(--danger); }
+    #fileList button {
+      width: 100%;
+      text-align: left;
+      margin-bottom: 4px;
+      background: #24344f;
+    }
+    #jsonView {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: var(--mono);
+      font-size: 12px;
+      line-height: 1.4;
+      max-height: 70vh;
+      overflow: auto;
+      border: 1px solid var(--border);
+      padding: 8px;
+      border-radius: 6px;
+      background: #101b2e;
+    }
+    .small { font-size: 12px; color: var(--muted); }
+    .pill {
+      display: inline-block;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 2px 8px;
+      margin: 2px;
+      font-size: 11px;
+      background: #192945;
+    }
+    @media (max-width: 980px) {
+      .layout { grid-template-columns: 1fr; }
+      aside { border-right: 0; border-bottom: 1px solid var(--border); }
+    }
+    @media print {
+      header, aside, .no-print { display: none !important; }
+      body { background: #fff; color: #000; font-size: 11px; }
+      .layout { display: block; }
+      .panel {
+        border: 1px solid #aaa;
+        background: #fff;
+        break-inside: avoid;
+      }
+      .panel h2 { background: #efefef; color: #000; }
+      th, td { border: 1px solid #aaa; }
+      a { color: #000; text-decoration: none; }
+      #jsonPanel { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Azure Audit Evidence Viewer</h1>
+    <div class="toolbar no-print">
+      <button id="pickFolderBtn">Select Evidence Folder</button>
+      <input id="fallbackFolderInput" type="file" webkitdirectory directory multiple>
+      <button id="printBtn">Print Report (PDF)</button>
+      <input id="filterText" type="text" placeholder="Filter datasets/files">
+      <span id="runPath" class="small">No evidence loaded</span>
+    </div>
+  </header>
+  <div class="layout">
+    <aside>
+      <div class="panel">
+        <h2>Files</h2>
+        <div class="panel-body">
+          <div id="fileCount" class="small">0 files</div>
+          <div id="fileList"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Control Families</h2>
+        <div id="familyPills" class="panel-body small">No data</div>
+      </div>
+    </aside>
+    <main>
+      <div class="panel">
+        <h2>Run Summary</h2>
+        <div class="panel-body">
+          <div id="kpis" class="kpi-grid"></div>
+        </div>
+      </div>
+      <div class="panel">
+        <h2>Subscription Coverage</h2>
+        <div class="panel-body"><div id="subTable"></div></div>
+      </div>
+      <div class="panel">
+        <h2>Dataset Coverage</h2>
+        <div class="panel-body"><div id="datasetTable"></div></div>
+      </div>
+      <div class="panel">
+        <h2>Errors / Skips</h2>
+        <div class="panel-body"><div id="issuesTable"></div></div>
+      </div>
+      <div id="jsonPanel" class="panel">
+        <h2>Raw JSON Viewer</h2>
+        <div class="panel-body">
+          <div id="jsonMeta" class="small">Select a file</div>
+          <pre id="jsonView"></pre>
+        </div>
+      </div>
+    </main>
+  </div>
+
+  <script>
+    const state = {
+      files: [],
+      byPath: new Map(),
+      parsed: {},
+      activePath: null
+    };
+
+    const els = {
+      pickFolderBtn: document.getElementById("pickFolderBtn"),
+      fallbackFolderInput: document.getElementById("fallbackFolderInput"),
+      printBtn: document.getElementById("printBtn"),
+      filterText: document.getElementById("filterText"),
+      runPath: document.getElementById("runPath"),
+      fileCount: document.getElementById("fileCount"),
+      fileList: document.getElementById("fileList"),
+      kpis: document.getElementById("kpis"),
+      subTable: document.getElementById("subTable"),
+      datasetTable: document.getElementById("datasetTable"),
+      issuesTable: document.getElementById("issuesTable"),
+      familyPills: document.getElementById("familyPills"),
+      jsonMeta: document.getElementById("jsonMeta"),
+      jsonView: document.getElementById("jsonView")
+    };
+
+    function escapeHtml(s) {
+      return String(s ?? "")
+        .replaceAll("&", "&amp;")
+        .replaceAll("<", "&lt;")
+        .replaceAll(">", "&gt;")
+        .replaceAll('"', "&quot;");
+    }
+
+    function normPath(path) {
+      return String(path || "").replaceAll("\\", "/");
+    }
+
+    async function readFileText(file) {
+      return await file.text();
+    }
+
+    function tryJsonParse(text) {
+      try {
+        return JSON.parse(text);
+      } catch {
+        return null;
+      }
+    }
+
+    async function loadFromInputFiles(fileList) {
+      resetState();
+      const files = Array.from(fileList || []);
+      for (const file of files) {
+        const rel = normPath(file.webkitRelativePath || file.name);
+        state.byPath.set(rel, file);
+        state.files.push(rel);
+      }
+      await hydrateParsedData();
+      renderAll();
+    }
+
+    async function loadFromDirectoryHandle(dirHandle) {
+      resetState();
+      async function walk(handle, prefix) {
+        for await (const [name, child] of handle.entries()) {
+          const rel = normPath(prefix ? `${prefix}/${name}` : name);
+          if (child.kind === "directory") {
+            await walk(child, rel);
+          } else {
+            const file = await child.getFile();
+            state.byPath.set(rel, file);
+            state.files.push(rel);
+          }
+        }
+      }
+      await walk(dirHandle, "");
+      await hydrateParsedData();
+      renderAll();
+    }
+
+    function resetState() {
+      state.files = [];
+      state.byPath = new Map();
+      state.parsed = {};
+      state.activePath = null;
+    }
+
+    function findPathBySuffix(suffix) {
+      const needle = normPath(suffix).toLowerCase();
+      return state.files.find(p => p.toLowerCase().endsWith(needle));
+    }
+
+    async function readJsonBySuffix(suffix) {
+      const path = findPathBySuffix(suffix);
+      if (!path) return null;
+      const file = state.byPath.get(path);
+      const text = await readFileText(file);
+      return tryJsonParse(text);
+    }
+
+    async function hydrateParsedData() {
+      state.files.sort((a, b) => a.localeCompare(b));
+      state.parsed.summary = await readJsonBySuffix("/summary.json") || await readJsonBySuffix("summary.json");
+      state.parsed.index = await readJsonBySuffix("/evidence_index.json") || await readJsonBySuffix("evidence_index.json") || [];
+      state.parsed.errors = await readJsonBySuffix("/collection_errors.json") || await readJsonBySuffix("collection_errors.json") || [];
+      state.parsed.skipped = await readJsonBySuffix("/collection_skipped.json") || await readJsonBySuffix("collection_skipped.json") || [];
+
+      const runRoot = findPathBySuffix("/summary.json");
+      if (runRoot) {
+        const parts = runRoot.split("/");
+        parts.pop();
+        els.runPath.textContent = `Loaded: ${parts.join("/")}`;
+      } else {
+        els.runPath.textContent = `Loaded ${state.files.length} files`;
+      }
+    }
+
+    function renderKpis() {
+      const s = state.parsed.summary || {};
+      const idx = Array.isArray(state.parsed.index) ? state.parsed.index : [];
+      const errs = Array.isArray(state.parsed.errors) ? state.parsed.errors : [];
+      const skips = Array.isArray(state.parsed.skipped) ? state.parsed.skipped : [];
+
+      const controls = new Set();
+      for (const row of idx) {
+        for (const c of (row.nist_800_53_controls || [])) controls.add(c);
+      }
+      const kpis = [
+        { k: "Datasets", v: s.datasets_collected ?? idx.length, cls: "status-ok" },
+        { k: "Errors", v: s.command_failures ?? errs.length, cls: errs.length ? "status-bad" : "status-ok" },
+        { k: "Skipped", v: s.datasets_skipped ?? skips.length, cls: skips.length ? "status-warn" : "status-ok" },
+        { k: "Files", v: state.files.length, cls: "status-ok" },
+        { k: "Controls", v: controls.size, cls: "status-ok" },
+        { k: "Started", v: s.run_started || "-", cls: "small" },
+        { k: "Finished", v: s.run_finished || "-", cls: "small" }
+      ];
+
+      els.kpis.innerHTML = kpis.map(x => `
+        <div class="kpi">
+          <div class="v ${x.cls}">${escapeHtml(x.v)}</div>
+          <div class="k">${escapeHtml(x.k)}</div>
+        </div>
+      `).join("");
+    }
+
+    function renderFamilies() {
+      const idx = Array.isArray(state.parsed.index) ? state.parsed.index : [];
+      const counts = new Map();
+      for (const row of idx) {
+        for (const f of (row.nist_800_53_families || [])) {
+          counts.set(f, (counts.get(f) || 0) + 1);
+        }
+      }
+      const sorted = Array.from(counts.entries()).sort((a, b) => a[0].localeCompare(b[0]));
+      if (!sorted.length) {
+        els.familyPills.textContent = "No families found.";
+        return;
+      }
+      els.familyPills.innerHTML = sorted.map(([f, c]) =>
+        `<span class="pill mono">${escapeHtml(f)} (${c})</span>`).join("");
+    }
+
+    function renderSubCoverage() {
+      const idx = Array.isArray(state.parsed.index) ? state.parsed.index : [];
+      const map = new Map();
+      for (const row of idx) {
+        const scope = String(row.scope || "");
+        const key = scope.startsWith("subscription/") ? scope.split("/")[1] : scope || "other";
+        if (!map.has(key)) map.set(key, { datasets: 0, records: 0 });
+        const v = map.get(key);
+        v.datasets += 1;
+        v.records += Number(row.records || 0);
+      }
+      const rows = Array.from(map.entries()).sort((a, b) => b[1].datasets - a[1].datasets);
+      if (!rows.length) {
+        els.subTable.innerHTML = "<div class='small'>No subscription datasets found.</div>";
+        return;
+      }
+      els.subTable.innerHTML = `
+        <table>
+          <thead><tr><th>Scope</th><th>Datasets</th><th>Records</th></tr></thead>
+          <tbody>
+            ${rows.map(([scope, v]) => `
+              <tr>
+                <td class="mono">${escapeHtml(scope)}</td>
+                <td>${v.datasets}</td>
+                <td>${v.records}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>`;
+    }
+
+    function renderDatasetCoverage() {
+      const idx = Array.isArray(state.parsed.index) ? state.parsed.index : [];
+      const rows = idx
+        .map(r => ({
+          dataset: r.dataset || "",
+          scope: r.scope || "",
+          records: Number(r.records || 0),
+          elapsed: Number(r.elapsed_seconds || 0),
+          families: (r.nist_800_53_families || []).join(","),
+          controls: (r.nist_800_53_controls || []).join(",")
+        }))
+        .sort((a, b) => b.records - a.records)
+        .slice(0, 300);
+
+      if (!rows.length) {
+        els.datasetTable.innerHTML = "<div class='small'>No evidence index data.</div>";
+        return;
+      }
+      els.datasetTable.innerHTML = `
+        <table>
+          <thead>
+            <tr><th>Dataset</th><th>Scope</th><th>Records</th><th>Sec</th><th>Families</th><th>Controls</th></tr>
+          </thead>
+          <tbody>
+            ${rows.map(r => `
+              <tr>
+                <td class="mono">${escapeHtml(r.dataset)}</td>
+                <td class="mono">${escapeHtml(r.scope)}</td>
+                <td>${r.records}</td>
+                <td>${r.elapsed}</td>
+                <td class="mono">${escapeHtml(r.families)}</td>
+                <td class="mono">${escapeHtml(r.controls)}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+        <div class="small">Showing up to 300 datasets by record count.</div>`;
+    }
+
+    function renderIssues() {
+      const errors = Array.isArray(state.parsed.errors) ? state.parsed.errors : [];
+      const skipped = Array.isArray(state.parsed.skipped) ? state.parsed.skipped : [];
+      const merged = [
+        ...errors.map(e => ({ type: "error", ...e })),
+        ...skipped.map(s => ({ type: "skipped", ...s }))
+      ];
+      if (!merged.length) {
+        els.issuesTable.innerHTML = "<div class='small status-ok'>No errors or skips.</div>";
+        return;
+      }
+      els.issuesTable.innerHTML = `
+        <table>
+          <thead><tr><th>Type</th><th>Timestamp</th><th>Dataset</th><th>Scope</th><th>Detail</th></tr></thead>
+          <tbody>
+            ${merged.slice(0, 400).map(r => `
+              <tr>
+                <td class="${r.type === "error" ? "status-bad" : "status-warn"}">${escapeHtml(r.type)}</td>
+                <td class="mono">${escapeHtml(r.timestamp || "")}</td>
+                <td class="mono">${escapeHtml(r.dataset || "")}</td>
+                <td class="mono">${escapeHtml(r.scope || "")}</td>
+                <td class="mono">${escapeHtml(r.error || r.reason || "")}</td>
+              </tr>`).join("")}
+          </tbody>
+        </table>
+        <div class="small">Showing up to 400 issue rows.</div>`;
+    }
+
+    function renderFileList() {
+      const filter = (els.filterText.value || "").toLowerCase();
+      const visible = state.files.filter(p => p.toLowerCase().includes(filter)).slice(0, 500);
+      els.fileCount.textContent = `${visible.length} shown / ${state.files.length} files`;
+      els.fileList.innerHTML = visible.map(path => `
+        <button type="button" data-path="${escapeHtml(path)}" class="mono">${escapeHtml(path)}</button>
+      `).join("");
+      for (const btn of els.fileList.querySelectorAll("button[data-path]")) {
+        btn.addEventListener("click", async () => {
+          const path = btn.getAttribute("data-path");
+          await openRawFile(path);
+        });
+      }
+    }
+
+    async function openRawFile(path) {
+      state.activePath = path;
+      const file = state.byPath.get(path);
+      if (!file) return;
+      const text = await readFileText(file);
+      els.jsonMeta.textContent = `${path} (${text.length.toLocaleString()} chars)`;
+      els.jsonView.textContent = text.slice(0, 1200000);
+    }
+
+    function renderAll() {
+      renderKpis();
+      renderFamilies();
+      renderSubCoverage();
+      renderDatasetCoverage();
+      renderIssues();
+      renderFileList();
+    }
+
+    els.filterText.addEventListener("input", renderFileList);
+    els.printBtn.addEventListener("click", () => window.print());
+    els.fallbackFolderInput.addEventListener("change", async e => {
+      await loadFromInputFiles(e.target.files);
+    });
+    els.pickFolderBtn.addEventListener("click", async () => {
+      if (!window.showDirectoryPicker) {
+        alert("Directory picker API not supported in this browser. Use folder input instead.");
+        return;
+      }
+      try {
+        const handle = await window.showDirectoryPicker({ mode: "read" });
+        await loadFromDirectoryHandle(handle);
+      } catch (err) {
+        console.error(err);
+      }
+    });
+  </script>
+</body>
+</html>
+
