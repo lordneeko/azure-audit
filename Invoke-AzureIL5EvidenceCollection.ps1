@@ -33,6 +33,11 @@ $script:EvidenceIndex = New-Object System.Collections.Generic.List[object]
 $script:CollectionErrors = New-Object System.Collections.Generic.List[object]
 $script:CollectionSkipped = New-Object System.Collections.Generic.List[object]
 $script:InstalledAzExtensions = New-Object System.Collections.Generic.HashSet[string]([System.StringComparer]::OrdinalIgnoreCase)
+$script:ProgressTotalCommands = 0
+$script:ProgressStartedCommands = 0
+$script:ProgressFinishedCommands = 0
+$script:ProgressFailedCommands = 0
+$script:ProgressSkippedCommands = 0
 $script:FamilyToControls = @{
     AC = @("AC-2", "AC-3", "AC-4", "AC-5", "AC-6", "AC-17", "AC-18", "AC-19")
     AU = @("AU-2", "AU-3", "AU-6", "AU-8", "AU-9", "AU-12")
@@ -64,6 +69,28 @@ function Write-Warn {
 function New-SafeName {
     param([string]$Name)
     return ($Name -replace "[^a-zA-Z0-9\-_\.]", "_")
+}
+
+function Add-PlannedCommands {
+    param(
+        [int]$Count,
+        [string]$Reason = ""
+    )
+    if ($Count -le 0) { return }
+    $script:ProgressTotalCommands += $Count
+    if ($Reason) {
+        Write-Info ("Planned +{0} command(s) for {1}. Total planned: {2}" -f $Count, $Reason, $script:ProgressTotalCommands)
+    }
+}
+
+function Get-ProgressText {
+    $inFlight = [Math]::Max(0, $script:ProgressStartedCommands - $script:ProgressFinishedCommands)
+    $remaining = [Math]::Max(0, $script:ProgressTotalCommands - $script:ProgressFinishedCommands - $inFlight)
+    return ("done {0}/{1}, in-flight {2}, remaining {3}" -f `
+        $script:ProgressFinishedCommands, `
+        $script:ProgressTotalCommands, `
+        $inFlight, `
+        $remaining)
 }
 
 function Ensure-Tooling {
@@ -133,7 +160,7 @@ function Invoke-AzCommandMonitored {
             Start-Sleep -Milliseconds $heartbeatMs
 
             $elapsedSeconds = [int]((Get-Date) - $started).TotalSeconds
-            Write-Info ("Still collecting ({0}s elapsed): {1}" -f $elapsedSeconds, $DisplayCommand)
+            Write-Info ("Still collecting ({0}s elapsed, {1}): {2}" -f $elapsedSeconds, (Get-ProgressText), $DisplayCommand)
 
             if ($elapsedSeconds -ge $timeoutSeconds) {
                 $timedOut = $true
@@ -226,18 +253,21 @@ function Invoke-AzJson {
 
     $display = "az " + ($Args -join " ")
     $controlIds = Get-ControlIdsForFamilies -Families $NistFamilies
+    $script:ProgressStartedCommands += 1
 
     if ($AirGappedProfile -and $RequiredExtensions -and $RequiredExtensions.Count -gt 0) {
         $missingExtensions = @($RequiredExtensions | Where-Object { -not $script:InstalledAzExtensions.Contains($_.ToLowerInvariant()) })
         if ($missingExtensions.Count -gt 0) {
             $reason = "Air-gapped mode skip; missing extension(s): {0}" -f ($missingExtensions -join ",")
-            Write-Info ("Skipping {0}: {1}" -f $Dataset, $reason)
+            $script:ProgressSkippedCommands += 1
+            $script:ProgressFinishedCommands += 1
+            Write-Info ("[{0}] Skipping {1}: {2}" -f (Get-ProgressText), $Dataset, $reason)
             Add-SkippedDataset -Scope $Scope -Dataset $Dataset -Command $display -Reason $reason -NistFamilies $NistFamilies -ControlIds $controlIds
             return
         }
     }
 
-    Write-Info $display
+    Write-Info ("[{0}] {1}" -f (Get-ProgressText), $display)
 
     $fullArgs = @() + $Args + @("--only-show-errors", "--output", "json")
     $result = Invoke-AzCommandMonitored -Args $fullArgs -DisplayCommand $display
@@ -257,6 +287,8 @@ function Invoke-AzJson {
             command = $display
             error = $msg
         }) | Out-Null
+        $script:ProgressFailedCommands += 1
+        $script:ProgressFinishedCommands += 1
         return
     }
 
@@ -272,6 +304,8 @@ function Invoke-AzJson {
             command = $display
             error = $msg
         }) | Out-Null
+        $script:ProgressFailedCommands += 1
+        $script:ProgressFinishedCommands += 1
         return
     }
 
@@ -285,6 +319,8 @@ function Invoke-AzJson {
             command = $display
             error = "Empty JSON response on stdout."
         }) | Out-Null
+        $script:ProgressFailedCommands += 1
+        $script:ProgressFinishedCommands += 1
         return
     }
 
@@ -306,6 +342,8 @@ function Invoke-AzJson {
             command = $display
             error = $parseErr
         }) | Out-Null
+        $script:ProgressFailedCommands += 1
+        $script:ProgressFinishedCommands += 1
         return
     }
 
@@ -335,6 +373,7 @@ function Invoke-AzJson {
         nist_800_53_controls = $controlIds
         elapsed_seconds = $result.elapsed_seconds
     }) | Out-Null
+    $script:ProgressFinishedCommands += 1
 }
 
 function Add-SubscriptionCollection {
@@ -421,6 +460,8 @@ function Add-SubscriptionCollection {
         @{ dataset = "advisor_recommendations"; args = @("advisor", "recommendation", "list", "--subscription", $SubId); fam = @("RA", "CA", "PM") }
     )
 
+    Add-PlannedCommands -Count $commands.Count -Reason ("subscription baseline {0}" -f $SubId)
+
     foreach ($cmd in $commands) {
         $safeDataset = New-SafeName $cmd.dataset
         $file = Join-Path $SubFolder ("{0}.json" -f $safeDataset)
@@ -435,6 +476,8 @@ function Add-SubscriptionCollection {
     if (Test-Path $vmListFile) {
         try {
             $vms = Get-Content $vmListFile | ConvertFrom-Json -Depth 100
+            $vmCount = @($vms).Count
+            Add-PlannedCommands -Count ($vmCount * 2) -Reason ("VM expansions {0}" -f $SubId)
             foreach ($vm in @($vms)) {
                 if (-not $vm.name -or -not $vm.resourceGroup) { continue }
                 $vmSafe = New-SafeName $vm.name
@@ -455,6 +498,8 @@ function Add-SubscriptionCollection {
     if (Test-Path $aksFile) {
         try {
             $clusters = Get-Content $aksFile | ConvertFrom-Json -Depth 100
+            $aksCount = @($clusters).Count
+            Add-PlannedCommands -Count $aksCount -Reason ("AKS expansions {0}" -f $SubId)
             foreach ($aks in @($clusters)) {
                 if (-not $aks.name -or -not $aks.resourceGroup) { continue }
                 $aksSafe = New-SafeName $aks.name
@@ -473,6 +518,11 @@ function Add-SubscriptionCollection {
         if (Test-Path $resourcesFile) {
             try {
                 $resources = Get-Content $resourcesFile | ConvertFrom-Json -Depth 100
+                $resourceCount = @($resources).Count
+                $extraPerResource = 0
+                if ($IncludeResourceConfigDump) { $extraPerResource += 1 }
+                if ($IncludeResourceDiagnostics) { $extraPerResource += 1 }
+                Add-PlannedCommands -Count ($resourceCount * $extraPerResource) -Reason ("Resource expansions {0}" -f $SubId)
                 foreach ($res in @($resources)) {
                     if (-not $res.id) { continue }
                     $resToken = New-SafeName (($res.name + "_" + $res.type).ToLowerInvariant())
@@ -525,6 +575,7 @@ try {
     Write-Info ("Output root: {0}" -f $root)
 
     $script:CurrentStep = "tenant_level_collection"
+    Add-PlannedCommands -Count 6 -Reason "tenant/session baseline"
     Invoke-AzJson -Args @("version") -OutputFile (Join-Path $root "az_version.json") `
         -Scope "session" -Dataset "az_version" -NistFamilies @("SA", "CM")
     Invoke-AzJson -Args @("extension", "list") -OutputFile (Join-Path $root "az_extensions.json") `
@@ -644,6 +695,7 @@ try {
     $summary | ConvertTo-Json -Depth 10 | Set-Content -Path $summaryPath -Encoding utf8
 
     Write-Info ("Completed. Datasets: {0}, Skipped: {1}, Failures: {2}" -f $script:EvidenceIndex.Count, $script:CollectionSkipped.Count, $script:CollectionErrors.Count)
+    Write-Info ("Command progress: {0}; failed={1}; skipped={2}" -f (Get-ProgressText), $script:ProgressFailedCommands, $script:ProgressSkippedCommands)
     Write-Info ("Evidence index: {0}" -f $indexPath)
     Write-Info ("Run summary: {0}" -f $summaryPath)
     if ($ControlCatalogCsv -and $controlCatalogResolved) {
